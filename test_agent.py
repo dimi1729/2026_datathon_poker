@@ -195,3 +195,45 @@ def test_reads_port_from_environment():
 # ---------------------------------------------------------------------------
 # Add your own tests below, e.g. "with two aces preflop my bot raises".
 # ---------------------------------------------------------------------------
+
+
+# ----- strategies.py / arena.py -------------------------------------------------
+
+import pytest
+
+from arena import Timing, play_half
+from strategies import STRATEGIES
+
+
+@pytest.mark.parametrize("name", sorted(STRATEGIES))
+def test_every_strategy_plays_only_legal_actions(name):
+    """Each strategy plays 200 deals against random in both seats with zero errors."""
+    timings: dict[str, Timing] = {}
+    for half in (1, 2):
+        play_half((name, "random"), "test", half, 200, timings)
+    assert all(t.errors == 0 for t in timings.values())
+
+
+# ----- preflop.py ---------------------------------------------------------------
+
+from evaluator import cards_from_str
+from preflop import EQUITY, NUM_HANDS, hand_rank, preflop_equity, preflop_percentile
+
+
+def test_preflop_table_loaded_and_sane():
+    assert EQUITY is not None and len(EQUITY) == NUM_HANDS
+    assert all(0.0 <= preflop_equity(h) <= 1.0 for h in ([0, 1, 2, 3, 4], [31, 32, 33, 34, 35]))
+
+
+def test_preflop_suit_symmetry_and_order():
+    a = cards_from_str("Ah As 7h 7s 9c")
+    b = cards_from_str("Ad Ac 7d 7c 9h")
+    assert preflop_equity(a) == preflop_equity(b)
+    assert preflop_equity(a) == preflop_equity(list(reversed(a)))  # order doesn't matter
+    assert preflop_equity(cards_from_str("Ah As Jh Jd Ts")) > preflop_equity(cards_from_str("6c 6d 6h 6s Kd"))
+    assert 0.9 < preflop_percentile(cards_from_str("Ah As Jh Jd Ts")) <= 1.0
+
+
+def test_hand_rank_range():
+    assert hand_rank([0, 1, 2, 3, 4]) == 0
+    assert hand_rank([31, 32, 33, 34, 35]) == NUM_HANDS - 1

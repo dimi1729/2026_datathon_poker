@@ -38,24 +38,33 @@ from game import Action, AgentConfig, HandResult, Observation, Street
 # answer within 15 seconds of starting.
 warmup()
 
+# Preflop strength tables (built offline by tools/build_preflop_table.py), loaded
+# once here: preflop_equity(hole) / preflop_percentile(hole) are plain lookups.
+from preflop import preflop_equity, preflop_percentile  # noqa: E402,F401
+
 # rename as your team/bot's name
-PARTICIPANT = "TotallyAwesomeDatathonParticipant"
-AGENT_NAME = "JustAsAwesomeAgent"
+PARTICIPANT = "TotallyAwesomeDatathonParticipant"  # TODO: your team name
+AGENT_NAME = f"RandomBot ({os.environ.get('STRATEGY', 'random')})"
 
 
 # ===== YOUR CODE HERE =====
 
+# The actual strategies live in strategies.py. STRATEGY picks one (default:
+# random), so the same server can play any of them, e.g.
+#     STRATEGY=always_allin PORT=5009 python agent.py
+from strategies import make_strategy
+
+STRATEGY = make_strategy(os.environ.get("STRATEGY", "random"))
+
+
 def new_half(config: AgentConfig, memory: dict) -> None:
     """Called at the start of each half-match (1000 hands).
 
-    `memory` is a fresh, empty dict every half. Store anything you want to
-    remember between hands in it, e.g. memory["opp_raises"] = 0.
-    `config` holds the match settings (starting_stack, big_blind, ...).
-
-    In the tournament, each half runs in a brand-new copy of your server,
-    so nothing you learn in one half carries over to the other half.
+    `memory` is a fresh, empty dict every half. In the tournament each half
+    runs in a brand-new copy of this server, so nothing carries over.
     """
     memory["hands_played"] = 0
+    STRATEGY.new_half(config, memory)
 
 
 def choose_action(obs: Observation, memory: dict) -> Action:
@@ -80,31 +89,19 @@ def choose_action(obs: Observation, memory: dict) -> Action:
         big_blind           size of the big blind in chips
 
     Actions: Action.FOLD, Action.CHECK_CALL, Action.RAISE_HALF, Action.RAISE_POT
-    Cards are ints: card_rank(c) is 0 (six) .. 8 (ace), card_suit(c) is 0..3,
-    and cards_to_str(obs.hole_cards) prints them like "6h 7c 9s Kd Ah".
-    Once all 5 board cards are out, omaha_score(obs.hole_cards, obs.board)
-    scores your hand (higher is better).
     """
-
-    # Simple example of a heuristic bot, which just checks when it is of no cost, otherwise folds
-    # Replace this with your strategy!
-    if obs.to_call == 0:
-        return Action.CHECK_CALL
-    return Action.FOLD
+    action = STRATEGY.choose_action(obs, memory)
+    # Safety net: an illegal action is an error (5 errors = forfeit), so fall
+    # back to the free/cheap default instead.
+    if action not in obs.legal_actions:
+        return Action.CHECK_CALL if obs.to_call == 0 else Action.FOLD
+    return action
 
 
 def on_hand_end(result: HandResult, memory: dict) -> None:
-    """Called once for every finished hand. Optional: learn from what happened.
-
-    To save time, the judge sends finished hands along with your next
-    decision request, so this always runs BEFORE choose_action() sees the
-    next hand. (The last hands of a half arrive at the end of the half.)
-
-    result has: hand_index, my_net (chips won or lost), pot,
-    went_to_showdown, board (cards revealed), opp_hole (opponent's cards,
-    only after a showdown, else None), winner ('me', 'opp' or 'split').
-    """
-    memory["hands_played"] += 1
+    """Called once for every finished hand (before the next choose_action)."""
+    memory["hands_played"] = memory.get("hands_played", 0) + 1
+    STRATEGY.on_hand_end(result, memory)
 
 # ===== END OF YOUR CODE =====
 
