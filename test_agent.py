@@ -205,7 +205,7 @@ from arena import Timing, play_half
 from strategies import STRATEGIES
 
 
-@pytest.mark.parametrize("name", sorted(STRATEGIES))
+@pytest.mark.parametrize("name", sorted(n for n in STRATEGIES if n != "jev"))  # jev costs API credits
 def test_every_strategy_plays_only_legal_actions(name):
     """Each strategy plays 200 deals against random in both seats with zero errors."""
     timings: dict[str, Timing] = {}

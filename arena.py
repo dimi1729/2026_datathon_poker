@@ -21,6 +21,7 @@ import itertools
 import math
 import statistics
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from game import (BIG_BLIND, CHOP_Z, NUM_DEALS, TIME_BANK_SECONDS, AgentConfig, Game,
@@ -41,7 +42,7 @@ class Timing:
 
 
 def play_half(names: tuple[str, str], seed: str, half: int, deals: int,
-              timings: dict[str, Timing]) -> list[int]:
+              timings: dict[str, Timing], threads: int = 1) -> list[int]:
     """Play one half. names[0] is 'agent1'. Returns agent1's net chips per deal."""
     a1_seat = 0 if half == 1 else 1
     seat_names = (names[0], names[1]) if a1_seat == 0 else (names[1], names[0])
@@ -51,8 +52,7 @@ def play_half(names: tuple[str, str], seed: str, half: int, deals: int,
     for bot, mem in zip(bots, mems):
         bot.new_half(AgentConfig(), mem)
 
-    nets = []
-    for d in range(deals):
+    def play_deal(d: int) -> int:
         game = Game(make_deal(seed, d), button_for_deal(d), hand_index=d)
         while not game.is_terminal:
             seat = game.to_act
@@ -60,8 +60,9 @@ def play_half(names: tuple[str, str], seed: str, half: int, deals: int,
             start = time.perf_counter()
             try:
                 action = bots[seat].choose_action(obs, mems[seat])
-            except Exception:
+            except Exception as exc:
                 action = None
+                first_errors.append(f"{seat_names[seat]}: {type(exc).__name__}: {exc}")
             t[seat].samples.append(time.perf_counter() - start)
             try:
                 game.apply(action)
@@ -70,7 +71,18 @@ def play_half(names: tuple[str, str], seed: str, half: int, deals: int,
                 game.apply(default_action(obs.to_call))
         for seat in (0, 1):
             bots[seat].on_hand_end(game.hand_result(seat), mems[seat])
-        nets.append(game.result().nets[a1_seat])
+        return game.result().nets[a1_seat]
+
+    first_errors: list[str] = []
+    if threads > 1:
+        # Deals run concurrently: only safe for strategies that keep no state
+        # across hands (e.g. network-bound ones like jev).
+        with ThreadPoolExecutor(threads) as pool:
+            nets = list(pool.map(play_deal, range(deals)))
+    else:
+        nets = [play_deal(d) for d in range(deals)]
+    for e in first_errors[:3]:
+        print("  error:", e)
 
     for seat in (0, 1):
         timings.setdefault(seat_names[seat], Timing()).add(t[seat])
@@ -87,10 +99,10 @@ class MatchResult:
 
 
 def play_match(a1: str, a2: str, seed: str, deals: int,
-               timings: dict[str, Timing]) -> MatchResult:
+               timings: dict[str, Timing], threads: int = 1) -> MatchResult:
     """Duplicate match: both halves on the same cards, seats swapped."""
-    h1 = play_half((a1, a2), seed, 1, deals, timings)
-    h2 = play_half((a1, a2), seed, 2, deals, timings)
+    h1 = play_half((a1, a2), seed, 1, deals, timings, threads)
+    h2 = play_half((a1, a2), seed, 2, deals, timings, threads)
     paired = [(x + y) / BIG_BLIND for x, y in zip(h1, h2)]
     mean = sum(paired) / deals
     se = statistics.stdev(paired) / math.sqrt(deals) if deals > 1 else 0.0
@@ -108,6 +120,8 @@ def main() -> None:
     p.add_argument("strategies", nargs="*", help=f"default: all of {sorted(STRATEGIES)}")
     p.add_argument("--deals", type=int, default=NUM_DEALS, help="deals per half (default 1000)")
     p.add_argument("--seeds", type=int, default=1, help="matches per pairing, each on new cards")
+    p.add_argument("--threads", type=int, default=1,
+                   help="play deals concurrently (only for stateless, network-bound strategies)")
     p.add_argument("--seed", default="arena", help="base seed (same seed = same cards)")
     args = p.parse_args()
 
@@ -123,7 +137,7 @@ def main() -> None:
 
     for a1, a2 in itertools.combinations(names, 2):
         for k in range(args.seeds):
-            r = play_match(a1, a2, f"{args.seed}-{k}", args.deals, timings)
+            r = play_match(a1, a2, f"{args.seed}-{k}", args.deals, timings, args.threads)
             matrix.setdefault((a1, a2), []).append(r)
             pts = {"W": 1.0, "L": 0.0, "C": 0.5}[r.verdict]
             points[a1] += pts

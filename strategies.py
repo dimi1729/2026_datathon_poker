@@ -158,6 +158,14 @@ STRATEGIES: dict = {
 }
 STRATEGIES["preflop_tight"] = _named("preflop_tight", PreflopThreshold,
                                      raise_pcts=(0.80, 0.92, 0.97), fold_pct=0.35, margin=0.06)
+
+
+def _jev() -> Strategy:
+    from jev_strategy import JevStrategy  # lazy: needs network + httpx, never used in the tournament
+    return JevStrategy()
+
+
+STRATEGIES["jev"] = _jev
 STRATEGIES["preflop_loose"] = _named("preflop_loose", PreflopThreshold,
                                      raise_pcts=(0.55, 0.80, 0.92), fold_pct=0.05, margin=0.0)
 
