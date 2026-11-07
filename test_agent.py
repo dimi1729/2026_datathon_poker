@@ -202,7 +202,7 @@ def test_reads_port_from_environment():
 import pytest
 
 from arena import Timing, play_half
-from strategies import STRATEGIES
+from strategies import STRATEGIES, make_strategy
 
 
 @pytest.mark.parametrize("name", sorted(n for n in STRATEGIES if n != "jev"))  # jev costs API credits
@@ -237,3 +237,60 @@ def test_preflop_suit_symmetry_and_order():
 def test_hand_rank_range():
     assert hand_rank([0, 1, 2, 3, 4]) == 0
     assert hand_rank([31, 32, 33, 34, 35]) == NUM_HANDS - 1
+
+
+# ----- adaptive agent internals ---------------------------------------------------
+
+import agent as agent_mod
+from game import Game, make_deal, button_for_deal
+
+
+@pytest.mark.parametrize("opp_name", ["maniac", "overfolder", "always_allin"])
+def test_agent_has_no_swallowed_internal_errors(opp_name):
+    """choose_action/on_hand_end catch exceptions (to avoid forfeits); make sure none happen."""
+    opp = make_strategy(opp_name)
+    mem, omem = {}, {}
+    agent_mod.new_half(AgentConfig(), mem)
+    opp.new_half(AgentConfig(), omem)
+    for d in range(300):
+        g = Game(make_deal("errs", d), button_for_deal(d), hand_index=d)
+        while not g.is_terminal:
+            s = g.to_act
+            bot, m = (agent_mod, mem) if s == 0 else (opp, omem)
+            g.apply(bot.choose_action(g.observation(s), m))
+        agent_mod.on_hand_end(g.hand_result(0), mem)
+    assert mem["errors"] == [], mem["errors"][0]
+    assert mem["hands"] == 300
+
+
+def test_stoploss_reverts_and_recovers():
+    mem = {}
+    agent_mod.new_half(AgentConfig(), mem)
+    w = agent_mod.CONFIG["stoploss_window"]
+    for i in range(w):
+        agent_mod._stoploss(mem, "exploit", -1.0 + (0.1 if i % 2 else -0.1))
+    assert mem["sl"]["mode"] == "revert"
+    for _ in range(w):
+        agent_mod._stoploss(mem, "default", 0.0)
+    assert mem["sl"]["mode"] == "exploit"
+
+
+def test_robust_model_distrusts_quickly_and_trusts_slowly():
+    """Opponent showed many river bluffs long ago but none recently: the robust
+    model must NOT keep calling wider (river_call_margin stays at/above default)."""
+    def run(robust):
+        mem = {}
+        agent_mod.new_half(AgentConfig(), mem)
+        mem["robust"] = robust
+        mem["hands"] = 200
+        for _ in range(30):
+            agent_mod._add(mem, "river_bluff", 1)       # old: 30 bluffs shown
+        for _ in range(200):
+            agent_mod._decay(mem)                      # ...200 hands ago
+        for _ in range(8):
+            agent_mod._add(mem, "river_bluff", 0)       # recent: value only
+        agent_mod._update_params(mem)
+        return mem["P"]["river_call_margin"]
+    default = agent_mod.CONFIG["river_call_margin"]
+    assert run(robust=False) < default                 # naive: still calls wider
+    assert run(robust=True) >= default                 # robust: follows the recent, safer read

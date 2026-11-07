@@ -142,6 +142,71 @@ class PreflopThreshold(Strategy):
         return Action.FOLD
 
 
+class Maniac(Strategy):
+    """Zoo bot: hyper-aggressive, never folds. Raises pot 50%, half pot 25%, calls 25%."""
+
+    name = "maniac"
+
+    def new_half(self, config, memory):
+        memory["rng"] = random.Random(7)
+
+    def choose_action(self, obs, memory):
+        rng = memory.setdefault("rng", random.Random(7))
+        x = rng.random()
+        if x < 0.5 and Action.RAISE_POT in obs.legal_actions:
+            return Action.RAISE_POT
+        if x < 0.75 and Action.RAISE_HALF in obs.legal_actions:
+            return Action.RAISE_HALF
+        return Action.CHECK_CALL
+
+
+class OverFolder(PreflopThreshold):
+    """Zoo bot: plays preflop like `preflop`, but postflop folds to any bet
+    unless its starting hand was top 10%. Never bets postflop without one."""
+
+    name = "overfolder"
+
+    def choose_action(self, obs, memory):
+        if obs.street == Street.PREFLOP:
+            return super().choose_action(obs, memory)
+        strong = preflop_percentile(obs.hole_cards) >= 0.90
+        if obs.to_call == 0:
+            return Action.RAISE_HALF if strong and Action.RAISE_HALF in obs.legal_actions else Action.CHECK_CALL
+        return Action.CHECK_CALL if strong else Action.FOLD
+
+
+class AgentStrategy(Strategy):
+    """The submission bot (agent.py) as a library strategy, for arena.py."""
+
+    name = "agent"
+
+    def __init__(self, exploit: bool = True, advert=None, robust=None, **flags) -> None:
+        import agent  # lazy: agent.py builds its tables at import
+        self.mod = agent
+        self.exploit = exploit
+        self.advert, self.robust = advert, robust  # None = use agent.CONFIG
+        self.flags = flags                         # other per-half memory overrides
+
+    def new_half(self, config, memory):
+        self.mod.new_half(config, memory)
+        if not self.exploit:
+            memory["no_exploit"] = True  # opponent model still tracked, never used
+        if self.advert is not None:
+            memory["advert"] = self.advert
+        if self.robust is not None:
+            memory["robust"] = self.robust
+        memory.update(self.flags)
+
+    def choose_action(self, obs, memory):
+        return self.mod.choose_action(obs, memory)
+
+    def on_hand_end(self, result, memory):
+        self.mod.on_hand_end(result, memory)
+
+    def report(self, memory) -> str:
+        return self.mod.report(memory)
+
+
 def _named(name: str, cls, **kwargs):
     """A factory for a parameter variant of a strategy, registered under `name`."""
     def factory() -> Strategy:
@@ -154,7 +219,8 @@ def _named(name: str, cls, **kwargs):
 # name -> zero-argument factory
 STRATEGIES: dict = {
     cls.name: cls
-    for cls in (RandomStrategy, AlwaysFold, AlwaysCall, AlwaysHalfPot, AlwaysAllIn, PreflopThreshold)
+    for cls in (RandomStrategy, AlwaysFold, AlwaysCall, AlwaysHalfPot, AlwaysAllIn, PreflopThreshold,
+                Maniac, OverFolder, AgentStrategy)
 }
 STRATEGIES["preflop_tight"] = _named("preflop_tight", PreflopThreshold,
                                      raise_pcts=(0.80, 0.92, 0.97), fold_pct=0.35, margin=0.06)
@@ -166,6 +232,28 @@ def _jev() -> Strategy:
 
 
 STRATEGIES["jev"] = _jev
+STRATEGIES["agent_noexploit"] = _named("agent_noexploit", AgentStrategy, exploit=False)
+STRATEGIES["agent_advert"] = _named("agent_advert", AgentStrategy, advert=True)  # until bluffs are shown
+STRATEGIES["agent_advert_fixed"] = _named("agent_advert_fixed", AgentStrategy, advert=True,
+                                          advert_until_shown=False)          # fixed 60 hands
+STRATEGIES["agent_noadvert"] = _named("agent_noadvert", AgentStrategy, advert=False)
+STRATEGIES["agent_bluff2"] = _named("agent_bluff2", AgentStrategy, intermittent_bluff=0.02)
+STRATEGIES["agent_combo"] = _named("agent_combo", AgentStrategy, advert=True, intermittent_bluff=0.02)
+STRATEGIES["agent_naive"] = _named("agent_naive", AgentStrategy, robust=False)      # no recency/robust model
+STRATEGIES["agent_robust"] = _named("agent_robust", AgentStrategy, robust=True)
+
+
+def _zoo(name: str):
+    def factory() -> Strategy:
+        import zoo  # lazy: builds fasteval's table
+        reg: dict = {}
+        zoo.register(reg, _named)
+        return reg[name]()
+    return factory
+
+
+for _n in ("eq_honest", "eq_balanced", "naive_adaptive", "switcher"):
+    STRATEGIES[_n] = _zoo(_n)
 STRATEGIES["preflop_loose"] = _named("preflop_loose", PreflopThreshold,
                                      raise_pcts=(0.55, 0.80, 0.92), fold_pct=0.05, margin=0.0)
 

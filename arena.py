@@ -29,16 +29,23 @@ from game import (BIG_BLIND, CHOP_Z, NUM_DEALS, TIME_BANK_SECONDS, AgentConfig, 
 from strategies import STRATEGIES, make_strategy
 
 
+REPORTS: list[str] = []  # end-of-half summaries from strategies that have report()
+
+
 @dataclass
 class Timing:
     """Thinking time of one strategy, in seconds per call."""
 
     samples: list[float] = field(default_factory=list)
     errors: int = 0
+    end_seconds: float = 0.0  # time spent in on_hand_end
+    halves: int = 0
 
     def add(self, other: "Timing") -> None:
         self.samples += other.samples
         self.errors += other.errors
+        self.end_seconds += other.end_seconds
+        self.halves += other.halves
 
 
 def play_half(names: tuple[str, str], seed: str, half: int, deals: int,
@@ -70,7 +77,9 @@ def play_half(names: tuple[str, str], seed: str, half: int, deals: int,
                 t[seat].errors += 1
                 game.apply(default_action(obs.to_call))
         for seat in (0, 1):
+            start = time.perf_counter()
             bots[seat].on_hand_end(game.hand_result(seat), mems[seat])
+            t[seat].end_seconds += time.perf_counter() - start
         return game.result().nets[a1_seat]
 
     first_errors: list[str] = []
@@ -85,6 +94,10 @@ def play_half(names: tuple[str, str], seed: str, half: int, deals: int,
         print("  error:", e)
 
     for seat in (0, 1):
+        t[seat].halves = 1
+        if hasattr(bots[seat], "report"):
+            REPORTS.append(f"--- {seat_names[seat]} (seat {seat}) vs {seat_names[1 - seat]}, "
+                           f"seed {seed}, half {half} ---\n" + bots[seat].report(mems[seat]))
         timings.setdefault(seat_names[seat], Timing()).add(t[seat])
     return nets
 
@@ -122,6 +135,10 @@ def main() -> None:
     p.add_argument("--seeds", type=int, default=1, help="matches per pairing, each on new cards")
     p.add_argument("--threads", type=int, default=1,
                    help="play deals concurrently (only for stateless, network-bound strategies)")
+    p.add_argument("--first-vs-all", action="store_true",
+                   help="only play the first strategy against each of the others")
+    p.add_argument("--reports", choices=("none", "last", "all"), default="last",
+                   help="print end-of-half summaries of adaptive bots (default: the last one per pairing)")
     p.add_argument("--seed", default="arena", help="base seed (same seed = same cards)")
     args = p.parse_args()
 
@@ -132,10 +149,13 @@ def main() -> None:
     timings: dict[str, Timing] = {}
     points = {n: 0.0 for n in names}
     bb_sum = {n: 0.0 for n in names}
+    games = {n: 0 for n in names}
     matrix: dict[tuple[str, str], list[MatchResult]] = {}
     start = time.perf_counter()
 
-    for a1, a2 in itertools.combinations(names, 2):
+    pairings = ([(names[0], n) for n in names[1:]] if args.first_vs_all
+                else list(itertools.combinations(names, 2)))
+    for a1, a2 in pairings:
         for k in range(args.seeds):
             r = play_match(a1, a2, f"{args.seed}-{k}", args.deals, timings, args.threads)
             matrix.setdefault((a1, a2), []).append(r)
@@ -144,6 +164,8 @@ def main() -> None:
             points[a2] += 1 - pts
             bb_sum[a1] += r.mean_bb
             bb_sum[a2] -= r.mean_bb
+            games[a1] += 1
+            games[a2] += 1
     elapsed = time.perf_counter() - start
 
     print(f"{args.deals} deals/half, {args.seeds} match(es) per pairing, "
@@ -154,12 +176,17 @@ def main() -> None:
             print(f"  {a1:>13} vs {a2:<13} {r.mean_bb:+8.3f}  "
                   f"[{r.ci[0]:+8.3f}, {r.ci[1]:+8.3f}]  {r.verdict}")
 
-    n_opp = max(1, (len(names) - 1) * args.seeds)
     print("\nStandings (points: win 1, chop 0.5; avg bb/deal over all matches):")
     for n in sorted(names, key=lambda n: (-points[n], -bb_sum[n])):
-        print(f"  {n:<13} {points[n]:5.1f} pts  {bb_sum[n] / n_opp:+8.3f} bb/deal")
+        print(f"  {n:<13} {points[n]:5.1f} pts  {bb_sum[n] / max(1, games[n]):+8.3f} bb/deal")
 
-    print("\nTiming of choose_action() per strategy (in-process, no HTTP):")
+    if REPORTS and args.reports != "none":
+        print("\nAdaptive-bot reports:")
+        shown = REPORTS if args.reports == "all" else REPORTS[1::2]
+        for r in shown:
+            print(r)
+
+    print("\nTiming per strategy (in-process, no HTTP; s/half includes on_hand_end):")
     print(f"  {'strategy':<13} {'calls':>8} {'mean us':>9} {'p99 us':>8} {'max us':>8} "
           f"{'s/half':>8} {'bank used':>9} {'errors':>6}")
     for n in names:
@@ -167,8 +194,7 @@ def main() -> None:
         if not t or not t.samples:
             continue
         s = sorted(t.samples)
-        halves = 2 * (len(names) - 1) * args.seeds
-        per_half = sum(s) / halves
+        per_half = (sum(s) + t.end_seconds) / max(1, t.halves)
         print(f"  {n:<13} {len(s):>8} {statistics.mean(s) * 1e6:>9.2f} {pct(s, .99) * 1e6:>8.2f} "
               f"{s[-1] * 1e6:>8.1f} {per_half:>8.4f} {per_half / TIME_BANK_SECONDS:>8.3%} {t.errors:>6}")
 
