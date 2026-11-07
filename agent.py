@@ -44,17 +44,17 @@ from preflop import preflop_equity, preflop_percentile  # noqa: E402,F401
 
 # rename as your team/bot's name
 PARTICIPANT = "TotallyAwesomeDatathonParticipant"  # TODO: your team name
-AGENT_NAME = f"RandomBot ({os.environ.get('STRATEGY', 'random')})"
+AGENT_NAME = os.environ.get("STRATEGY", "preflop_tight")
 
 
 # ===== YOUR CODE HERE =====
 
 # The actual strategies live in strategies.py. STRATEGY picks one (default:
-# random), so the same server can play any of them, e.g.
+# preflop_tight), so the same server can play any of them, e.g.
 #     STRATEGY=always_allin PORT=5009 python agent.py
 from strategies import make_strategy
 
-STRATEGY = make_strategy(os.environ.get("STRATEGY", "random"))
+STRATEGY = make_strategy(AGENT_NAME)
 
 
 def new_half(config: AgentConfig, memory: dict) -> None:

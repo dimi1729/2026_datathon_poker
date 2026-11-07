@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import random
 
-from game import Action, AgentConfig, HandResult, Observation
+from game import Action, AgentConfig, HandResult, Observation, Street
+from preflop import preflop_equity, preflop_percentile
 
 
 class Strategy:
@@ -92,10 +93,73 @@ class AlwaysAllIn(Strategy):
         return Action.RAISE_POT if Action.RAISE_POT in obs.legal_actions else Action.CHECK_CALL
 
 
-STRATEGIES: dict[str, type[Strategy]] = {
+class PreflopThreshold(Strategy):
+    """Card-aware bot driven only by the offline preflop table (preflop.py).
+
+    Preflop:
+      * raise pot if the hand's percentile clears the bar for this raise
+        number (open / 3-bet / 4-bet+ get stricter bars);
+      * otherwise check if free;
+      * otherwise call if equity vs a random hand beats the pot odds by
+        `margin` (and the hand isn't in the bottom `fold_pct`), else fold.
+    Postflop (no board reading yet): bet half pot with the top `value_pct`
+    hands when checked to, otherwise check; facing a bet, use the same
+    equity-vs-pot-odds rule with `post_margin`.
+    """
+
+    name = "preflop"
+
+    def __init__(self, raise_pcts=(0.70, 0.88, 0.95), margin=0.03, fold_pct=0.15,
+                 value_pct=0.90, post_margin=0.05) -> None:
+        self.raise_pcts = raise_pcts
+        self.margin = margin
+        self.fold_pct = fold_pct
+        self.value_pct = value_pct
+        self.post_margin = post_margin
+
+    def choose_action(self, obs, memory):
+        eq = preflop_equity(obs.hole_cards)
+        pct = preflop_percentile(obs.hole_cards)
+        legal = obs.legal_actions
+        pot_odds = obs.to_call / (obs.pot + obs.to_call) if obs.to_call else 0.0
+
+        if obs.street == Street.PREFLOP:
+            bar = self.raise_pcts[min(obs.raises_this_street, len(self.raise_pcts) - 1)]
+            if pct >= bar and Action.RAISE_POT in legal:
+                return Action.RAISE_POT
+            if obs.to_call == 0:
+                return Action.CHECK_CALL
+            if pct >= self.fold_pct and eq >= pot_odds + self.margin:
+                return Action.CHECK_CALL
+            return Action.FOLD
+
+        if obs.to_call == 0:
+            if pct >= self.value_pct and Action.RAISE_HALF in legal:
+                return Action.RAISE_HALF
+            return Action.CHECK_CALL
+        if eq >= pot_odds + self.post_margin:
+            return Action.CHECK_CALL
+        return Action.FOLD
+
+
+def _named(name: str, cls, **kwargs):
+    """A factory for a parameter variant of a strategy, registered under `name`."""
+    def factory() -> Strategy:
+        s = cls(**kwargs)
+        s.name = name
+        return s
+    return factory
+
+
+# name -> zero-argument factory
+STRATEGIES: dict = {
     cls.name: cls
-    for cls in (RandomStrategy, AlwaysFold, AlwaysCall, AlwaysHalfPot, AlwaysAllIn)
+    for cls in (RandomStrategy, AlwaysFold, AlwaysCall, AlwaysHalfPot, AlwaysAllIn, PreflopThreshold)
 }
+STRATEGIES["preflop_tight"] = _named("preflop_tight", PreflopThreshold,
+                                     raise_pcts=(0.80, 0.92, 0.97), fold_pct=0.35, margin=0.06)
+STRATEGIES["preflop_loose"] = _named("preflop_loose", PreflopThreshold,
+                                     raise_pcts=(0.55, 0.80, 0.92), fold_pct=0.05, margin=0.0)
 
 
 def make_strategy(name: str) -> Strategy:
